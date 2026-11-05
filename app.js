@@ -450,6 +450,101 @@ function setVoiceLanguage(lang) {
 // -----------------------------------------------------------------
 // 3. Speech-to-Text Recognition (Telugu & English)
 // -----------------------------------------------------------------
+
+// Helper to remove any duplicate words or repeated consecutive phrases from recognized transcripts
+function deduplicateConsecutiveWords(text) {
+    if (!text) return '';
+    const words = text.trim().split(/\s+/);
+    if (words.length <= 1) return text.trim();
+
+    let cleaned = [...words];
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const maxK = Math.floor(cleaned.length / 2);
+        for (let k = maxK; k >= 1; k--) {
+            for (let i = 0; i <= cleaned.length - 2 * k; i++) {
+                const seq1 = cleaned.slice(i, i + k).join(' ').toLowerCase();
+                const seq2 = cleaned.slice(i + k, i + 2 * k).join(' ').toLowerCase();
+                if (seq1 === seq2) {
+                    cleaned.splice(i + k, k);
+                    changed = true;
+                    break;
+                }
+            }
+            if (changed) break;
+        }
+    }
+    return cleaned.join(' ');
+}
+
+// Helper to merge consecutive or cumulative speech transcripts without duplicate overlaps
+function mergeTranscripts(existing, newText) {
+    existing = (existing || '').trim();
+    newText = (newText || '').trim();
+    if (!existing) return newText;
+    if (!newText) return existing;
+
+    const existLower = existing.toLowerCase();
+    const newLower = newText.toLowerCase();
+
+    // Identical phrase or existing already ends with newText
+    if (existLower === newLower || existLower.endsWith(newLower)) return existing;
+
+    // Mobile cumulative result: newText contains existing as its prefix
+    if (newLower.startsWith(existLower)) return newText;
+
+    const existWords = existing.split(/\s+/);
+    const newWords = newText.split(/\s+/);
+
+    // Check for word-level overlap at the boundary (e.g. "sky blue with" + "with gold border")
+    const maxOverlap = Math.min(existWords.length, newWords.length);
+    for (let len = maxOverlap; len > 0; len--) {
+        const existTail = existWords.slice(existWords.length - len).join(' ').toLowerCase();
+        const newHead = newWords.slice(0, len).join(' ').toLowerCase();
+        if (existTail === newHead) {
+            return existWords.concat(newWords.slice(len)).join(' ');
+        }
+    }
+
+    return existing + ' ' + newText;
+}
+
+// Helper to strip already finalized text from the active interim transcript
+function cleanInterimAgainstFinal(finalText, interimText) {
+    finalText = (finalText || '').trim();
+    interimText = (interimText || '').trim();
+    if (!interimText) return '';
+    if (!finalText) return interimText;
+
+    const finalLower = finalText.toLowerCase();
+    const interimLower = interimText.toLowerCase();
+
+    // If interim is completely covered by final text, do not duplicate
+    if (finalLower === interimLower || finalLower.endsWith(interimLower)) {
+        return '';
+    }
+
+    // If interim repeats the entire final text prefix, take only the fresh interim words
+    if (interimLower.startsWith(finalLower)) {
+        return interimText.slice(finalText.length).trim();
+    }
+
+    // Check word-level overlap at boundary
+    const finalWords = finalText.split(/\s+/);
+    const interimWords = interimText.split(/\s+/);
+    const maxOverlap = Math.min(finalWords.length, interimWords.length);
+    for (let len = maxOverlap; len > 0; len--) {
+        const finalTail = finalWords.slice(finalWords.length - len).join(' ').toLowerCase();
+        const interimHead = interimWords.slice(0, len).join(' ').toLowerCase();
+        if (finalTail === interimHead) {
+            return interimWords.slice(len).join(' ');
+        }
+    }
+
+    return interimText;
+}
+
 function initSpeechRecognition() {
     const micBtn = document.getElementById('micBtn');
     const speechStatus = document.getElementById('speechStatus');
@@ -482,6 +577,8 @@ function initSpeechRecognition() {
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
+    let noSpeechCount = 0;
+
     if (micBtn) {
         micBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -507,6 +604,7 @@ function initSpeechRecognition() {
             } else {
                 // Start single recording session
                 isRecognitionStarting = true;
+                noSpeechCount = 0;
                 speechBaseText = promptInput ? promptInput.value.trim() : '';
                 recognition.lang = currentLang || 'en-US';
 
@@ -535,6 +633,7 @@ function initSpeechRecognition() {
         isRecording = true;
         isRecognitionStarting = false;
         isRecognitionStopping = false;
+        noSpeechCount = 0;
         if (micBtn) {
             micBtn.classList.add('recording');
             micBtn.setAttribute('aria-label', 'Stop recording');
@@ -546,24 +645,43 @@ function initSpeechRecognition() {
         }
     };
 
-    // Fix mobile duplication: Reconstruct sentence freshly from event.results on every event.
-    // Never accumulate with += inside a loop over event.resultIndex, which causes repeated
-    // segments on Android Chrome and WebKit mobile browsers.
+    // Mobile voice-input deduplication & separate interim/final handling:
+    // 1. Separate finalized chunks from active interim hypotheses.
+    // 2. Prevent mobile Android Chrome from echoing cumulative results repeatedly.
+    // 3. Strip finalized text from interim hypotheses so interim text isn't appended repeatedly.
+    // 4. Ensure each spoken word appears only once in the transcript.
     recognition.onresult = (event) => {
-        let sessionFinal = '';
-        let sessionInterim = '';
+        noSpeechCount = 0;
+        let finalStr = '';
+        let interimStr = '';
 
         for (let i = 0; i < event.results.length; i++) {
-            const result = event.results[i];
-            const transcript = result[0].transcript;
-            if (result.isFinal) {
-                sessionFinal += (sessionFinal ? ' ' : '') + transcript.trim();
+            const res = event.results[i];
+            if (!res || !res[0]) continue;
+            const text = (res[0].transcript || '').trim();
+            if (!text) continue;
+
+            if (res.isFinal) {
+                finalStr = mergeTranscripts(finalStr, text);
             } else {
-                sessionInterim += transcript;
+                interimStr = mergeTranscripts(interimStr, text);
             }
         }
 
-        const sessionSpoken = (sessionFinal + (sessionInterim ? ' ' + sessionInterim : '')).trim();
+        // Clean final transcripts from repeated consecutive words or phrases
+        finalStr = deduplicateConsecutiveWords(finalStr);
+
+        // Maintain strict separate handling for interim results:
+        // Filter out any interim words that are already present in finalStr
+        const uniqueInterim = cleanInterimAgainstFinal(finalStr, interimStr);
+
+        // Combine finalized speech with any pending interim hypothesis
+        let sessionSpoken = finalStr;
+        if (uniqueInterim) {
+            sessionSpoken = sessionSpoken ? (sessionSpoken + ' ' + uniqueInterim) : uniqueInterim;
+        }
+
+        sessionSpoken = deduplicateConsecutiveWords(sessionSpoken);
 
         if (promptInput && sessionSpoken) {
             promptInput.value = speechBaseText ? (speechBaseText + ' ' + sessionSpoken) : sessionSpoken;
@@ -573,21 +691,33 @@ function initSpeechRecognition() {
     };
 
     recognition.onerror = (event) => {
-        isRecording = false;
-        isRecognitionStarting = false;
-        isRecognitionStopping = false;
-        if (micBtn) {
-            micBtn.classList.remove('recording');
-            micBtn.setAttribute('aria-label', 'Start recording');
-        }
-
         if (event.error === 'no-speech') {
-            if (speechStatus) {
-                speechStatus.innerHTML = currentLang === 'te-IN'
-                    ? 'మాటలు వినబడలేదు. మైక్రోఫోన్ నొక్కి మళ్లీ మాట్లాడండి లేదా పైన టైప్ చేయండి.'
-                    : 'No speech was detected. Click microphone to speak again or type above.';
+            noSpeechCount++;
+            if (noSpeechCount > 2) {
+                // User has been silent across multiple cycles, finish recording session
+                isRecording = false;
+                isRecognitionStarting = false;
+                isRecognitionStopping = false;
+                if (micBtn) {
+                    micBtn.classList.remove('recording');
+                    micBtn.setAttribute('aria-label', 'Start recording');
+                }
+                if (speechStatus) {
+                    speechStatus.innerHTML = currentLang === 'te-IN'
+                        ? 'మాటలు వినబడలేదు. మైక్రోఫోన్ నొక్కి మళ్లీ మాట్లాడండి లేదా పైన టైప్ చేయండి.'
+                        : 'No speech was detected. Click microphone to speak again or type above.';
+                }
             }
+            // Otherwise let onend seamlessly resume so user can continue speaking naturally
         } else if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+            isRecording = false;
+            isRecognitionStarting = false;
+            isRecognitionStopping = false;
+            noSpeechCount = 0;
+            if (micBtn) {
+                micBtn.classList.remove('recording');
+                micBtn.setAttribute('aria-label', 'Start recording');
+            }
             if (speechStatus) {
                 speechStatus.innerHTML = currentLang === 'te-IN'
                     ? '<span style="color:#DC2626">⚠️ మైక్రోఫోన్ అనుమతి నిరాకరించబడింది. దయచేసి బ్రౌజర్ సెట్టింగ్స్‌లో మైక్ అనుమతి ఇవ్వండి.</span>'
@@ -595,6 +725,14 @@ function initSpeechRecognition() {
             }
             showToast(currentLang === 'te-IN' ? 'దయచేసి మైక్రోఫోన్ అనుమతి ఇవ్వండి' : 'Microphone permission required');
         } else if (event.error !== 'aborted') {
+            isRecording = false;
+            isRecognitionStarting = false;
+            isRecognitionStopping = false;
+            noSpeechCount = 0;
+            if (micBtn) {
+                micBtn.classList.remove('recording');
+                micBtn.setAttribute('aria-label', 'Start recording');
+            }
             if (speechStatus) {
                 speechStatus.innerHTML = `<span style="color:#DC2626">Voice status: ${event.error}</span>`;
             }
@@ -602,12 +740,30 @@ function initSpeechRecognition() {
     };
 
     recognition.onend = () => {
+        // If recording was NOT manually stopped by user and not terminated by fatal error,
+        // seamlessly resume on mobile so natural pauses don't abruptly end the recording session.
+        if (isRecording && !isRecognitionStopping && noSpeechCount < 3) {
+            speechBaseText = promptInput ? promptInput.value.trim() : '';
+            try {
+                recognition.start();
+                return;
+            } catch (err) {
+                // If restart fails, proceed to clean shutdown
+            }
+        }
+
         isRecording = false;
         isRecognitionStarting = false;
         isRecognitionStopping = false;
+        noSpeechCount = 0;
         if (micBtn) {
             micBtn.classList.remove('recording');
             micBtn.setAttribute('aria-label', 'Start recording');
+        }
+
+        // Clean up prompt text once recording is stopped
+        if (promptInput) {
+            promptInput.value = deduplicateConsecutiveWords(promptInput.value.trim());
         }
 
         // STRICT REQUIREMENT: DO NOT generate any design inside onend!
@@ -1034,13 +1190,22 @@ function generateAnotherDesign() {
     const presetIndex = generationSeed % patternVariations.length;
     const nextPreset = patternVariations[presetIndex];
 
-    // Apply the new pattern combination while preserving user colors & preferences
+    // Apply the new pattern combination while preserving user colors & requested motifs
     currentDesign.bodyPattern = nextPreset.bodyPattern;
-    currentDesign.borderStyle = nextPreset.borderStyle;
+    currentDesign.borderStyle = currentDesign.borderMotif ? (currentDesign.borderMotif === 'peacock' ? 'peacock_border' : 'double_zari') : nextPreset.borderStyle;
     currentDesign.palluStyle = nextPreset.palluStyle;
-    currentDesign.motifType = nextPreset.motifType;
+
+    // Never replace an explicitly user-requested motif with random alternatives
+    if (currentDesign.userRequestedMotif) {
+        currentDesign.motifType = currentDesign.userRequestedMotif;
+        currentDesign.bodyMotif = currentDesign.userRequestedMotif;
+    } else {
+        currentDesign.motifType = nextPreset.motifType;
+        currentDesign.bodyMotif = nextPreset.motifType;
+    }
+
     currentDesign.motifArrangement = nextPreset.motifArrangement;
-    currentDesign.motifDensity = nextPreset.density;
+    currentDesign.motifDensity = userDensity || nextPreset.density;
     currentDesign.title = `${selectedStyle} Saree - ${nextPreset.title}`;
 
     // Synchronize both Screen 2 and Screen 3 UI controls
@@ -1084,12 +1249,24 @@ function applySingleAIDesign(suggestion, detectedReqs, promptText) {
     if (previewBar) previewBar.style.display = 'block';
 
     currentDesign.title = suggestion.suggestedTitle || `${selectedStyle} Handloom Saree`;
-    currentDesign.sareeStyle = suggestion.style ? suggestion.style.nameEn : selectedStyle;
+    currentDesign.sareeStyle = suggestion.style ? (suggestion.style.nameEn || selectedStyle) : selectedStyle;
     currentDesign.bodyColor = suggestion.colors ? suggestion.colors.body : currentDesign.bodyColor;
     currentDesign.borderColor = suggestion.colors ? suggestion.colors.border : currentDesign.borderColor;
     currentDesign.palluColor = suggestion.colors ? suggestion.colors.pallu : currentDesign.palluColor;
     currentDesign.zariColor = suggestion.colors ? suggestion.colors.zari : currentDesign.zariColor;
-    currentDesign.motifType = suggestion.motif ? suggestion.motif.id : currentDesign.motifType;
+
+    const chosenMotif = suggestion.motif ? (suggestion.motif.id || suggestion.motif) : currentDesign.motifType;
+    currentDesign.motifType = chosenMotif;
+    currentDesign.bodyMotif = suggestion.bodyMotif || chosenMotif;
+    currentDesign.borderMotif = suggestion.borderMotif || (suggestion.borderStyle === 'peacock_border' ? 'peacock' : null);
+    currentDesign.palluMotif = suggestion.palluMotif || chosenMotif;
+
+    if (detectedReqs && detectedReqs.userRequestedMotif) {
+        currentDesign.userRequestedMotif = detectedReqs.userRequestedMotif;
+    } else if (suggestion.userRequestedMotif) {
+        currentDesign.userRequestedMotif = suggestion.userRequestedMotif;
+    }
+
     currentDesign.borderStyle = suggestion.borderStyle || currentDesign.borderStyle;
     currentDesign.bodyPattern = suggestion.bodyPattern || currentDesign.bodyPattern;
     currentDesign.palluStyle = suggestion.palluStyle || currentDesign.palluStyle;
@@ -1374,50 +1551,203 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
     const effectiveStyle = selectedStyle || 'Mangalagiri Cotton & Silk';
     const effLower = effectiveStyle.toLowerCase();
 
-    // 3. Exact Motif Extraction: Recognizes rose, lotus, jasmine, sunflower, peacock, mango, paisley, parrot, temple, etc.
+    // 3. Exact Motif Extraction: Recognizes rose, lotus, jasmine, sunflower, peacock, mango, paisley, parrot, temple, geometric/ikat, leaves/vines, elephant, swan
+    const MOTIF_DEFINITIONS = [
+        {
+            id: "rose",
+            name: "Rose (గులాబీ)",
+            keywords: [
+                "rose motif", "rose motifs", "rose flower", "rose flowers", "rose butti", "rose buttis", 
+                "roses", "rosebud", "gulabi", "గులాబీ పువ్వు", "గులాబీ మోటిఫ్", "గులాబి పువ్వు", 
+                "గులాబీలు", "గులాబి", "గులాబీ"
+            ],
+            singleRegex: /\brose\b/i
+        },
+        {
+            id: "lotus",
+            name: "Lotus (తామర)",
+            keywords: [
+                "lotus", "lotuses", "kamala", "kamal", "padma", "తామర పువ్వు", "కమలం", "తామర", 
+                "కమల", "పద్మం", "తామర పూవు", "పూలు", "పూల మోటిఫ్"
+            ]
+        },
+        {
+            id: "jasmine",
+            name: "Jasmine (మల్లె మొగ్గలు)",
+            keywords: [
+                "jasmine", "malle moggu", "malli moggu", "malle", "malli", "moggu", "chameli", 
+                "mallipoo", "మల్లె మొగ్గలు", "మల్లె మొగ్గ", "మల్లెపువ్వు", "మల్లెలు", "మల్లె", "మల్లి"
+            ]
+        },
+        {
+            id: "sunflower",
+            name: "Sunflower (సూర్యకాంతి)",
+            keywords: [
+                "sunflower", "sunflowers", "surajmukhi", "suryakanthi", "సూర్యకాంతి పువ్వు", 
+                "సూర్యకాంతి", "పొద్దుతిరుగుడు"
+            ]
+        },
+        {
+            id: "peacock",
+            name: "Peacock (నెమలి)",
+            keywords: [
+                "peacock", "peacocks", "mayuri", "mayur", "mor", "నెమలి", "నెమళ్ళు", 
+                "మయూరి", "మయూరం"
+            ]
+        },
+        {
+            id: "mango",
+            name: "Mango / Paisley (మామిడి / కల్కా)",
+            keywords: [
+                "mango motif", "mango motifs", "mango", "paisley", "paisleys", "kalka", "ambi", 
+                "keri", "మామిడి పిందె", "మామిడి పిందే", "మామిడి", "కల్కా", "పైస్లే"
+            ]
+        },
+        {
+            id: "parrot",
+            name: "Parrot (చిలుక)",
+            keywords: [
+                "parrot", "parrots", "kili", "chiluka", "ramachiluka", "tota", "రామచిలుక", 
+                "చిలుకలు", "చిలుక"
+            ]
+        },
+        {
+            id: "temple",
+            name: "Temple Gopuram (గోపురం)",
+            keywords: [
+                "temple motif", "temple gopuram", "gopuram motif", "spire", "గోపురం మోటిఫ్", 
+                "గోపురం", "గోపురాలు", "కోవెల"
+            ]
+        },
+        {
+            id: "ikat",
+            name: "Geometric Ikat Diamond (ఇకత్)",
+            keywords: [
+                "geometric ikat", "ikat diamond", "double ikat", "geometric pattern", 
+                "geometric patterns", "geometric design", "geometric motif", "geometric", 
+                "geometry", "ఇకత్ డైమండ్", "ఇకత్", "రేఖాగణిత నమూనా", "రేఖాగణిత"
+            ]
+        },
+        {
+            id: "leaves",
+            name: "Leaves & Vines (ఆకులు & తీగలు)",
+            keywords: [
+                "leaves and vines", "leaves & vines", "leaf motif", "leaves", "leaf", "vine", 
+                "vines", "lata", "creeper", "creepers", "ఆకులు & తీగలు", "తీగలు", "ఆకులు", 
+                "తీగ", "ఆకు", "లత"
+            ]
+        },
+        {
+            id: "elephant",
+            name: "Regal Elephant (ఏనుగు / గజ)",
+            keywords: [
+                "elephant", "elephants", "gaja", "hathi", "ఏనుగు", "ఏనుగులు", "గజ"
+            ]
+        },
+        {
+            id: "swan",
+            name: "Hamsa Swan (హంస)",
+            keywords: [
+                "swan", "swans", "hamsa", "హంస", "హంసలు"
+            ]
+        }
+    ];
+
+    let motifOccurrences = [];
+    MOTIF_DEFINITIONS.forEach(mDef => {
+        mDef.keywords.forEach(kw => {
+            let startPos = 0;
+            while (true) {
+                const idx = lower.indexOf(kw, startPos);
+                if (idx === -1) break;
+
+                const isWordStart = idx === 0 || /[\s,.;:!?'"()/\-]/.test(lower[idx - 1]);
+                const endIdx = idx + kw.length;
+                const isWordEnd = endIdx === lower.length || /[\s,.;:!?'"()/\-]/.test(lower[endIdx]);
+
+                const isOnlyRosePinkColor = (kw === 'rose' || kw === 'గులాబీ') && 
+                    (lower.includes('rose pink') || lower.includes('rose color') || lower.includes('rose colour') || lower.includes('గులాబీ రంగు') || lower.includes('గులాబి రంగు')) &&
+                    !lower.includes('rose motif') && !lower.includes('rose flower') && !lower.includes('rose butti') && !lower.includes('roses') && !lower.includes('గులాబీ పువ్వు') && !lower.includes('గులాబీలు');
+
+                if (isWordStart && isWordEnd && !isOnlyRosePinkColor) {
+                    motifOccurrences.push({
+                        motifId: mDef.id,
+                        name: mDef.name,
+                        keyword: kw,
+                        index: idx,
+                        length: kw.length
+                    });
+                }
+                startPos = idx + kw.length;
+            }
+        });
+
+        if (mDef.id === 'rose' && mDef.singleRegex && mDef.singleRegex.test(lower)) {
+            const hasColorMatch = lower.includes('rose pink') || lower.includes('rose color') || lower.includes('rose colour');
+            const hasExplicitRoseMotif = lower.includes('rose motif') || lower.includes('rose flower') || lower.includes('roses') || lower.includes('rose butti');
+            if (!hasColorMatch || hasExplicitRoseMotif) {
+                const match = mDef.singleRegex.exec(lower);
+                if (match && !motifOccurrences.some(o => o.motifId === 'rose')) {
+                    motifOccurrences.push({
+                        motifId: 'rose',
+                        name: mDef.name,
+                        keyword: 'rose',
+                        index: match.index,
+                        length: 4
+                    });
+                }
+            }
+        }
+    });
+
+    motifOccurrences.sort((a, b) => a.index !== b.index ? a.index - b.index : b.length - a.length);
+    let nonOverlappingMotifs = [];
+    for (let occ of motifOccurrences) {
+        const overlaps = nonOverlappingMotifs.some(prev => 
+            (occ.index >= prev.index && occ.index < prev.index + prev.length) ||
+            (prev.index >= occ.index && prev.index < occ.index + occ.length)
+        );
+        if (!overlaps) nonOverlappingMotifs.push(occ);
+    }
+
+    let borderMotif = null;
+    let palluMotif = null;
+    let bodyMotif = null;
     let detectedMotif = null;
     let detectedMotifName = null;
 
-    if (lower.includes('sunflower') || lower.includes('surajmukhi') || lower.includes('suryakanthi') || lower.includes('సూర్యకాంతి') || lower.includes('పొద్దుతిరుగుడు')) {
-        detectedMotif = 'sunflower';
-        detectedMotifName = 'Sunflower (సూర్యకాంతి)';
-    } else if (lower.includes('rose motif') || lower.includes('rose flower') || lower.includes('గులాబీ పువ్వు') || lower.includes('గులాబీ మోటిఫ్') || lower.includes('గులాబి పువ్వు') ||
-               (/\brose\b/i.test(lower) && !lower.includes('rose pink') && !lower.includes('rose color') && !lower.includes('rose colour') && !lower.includes('rose saree') && !lower.includes('rose body'))) {
-        detectedMotif = 'rose';
-        detectedMotifName = 'Rose (గులాబీ)';
-    } else if (lower.includes('jasmine') || lower.includes('malle') || lower.includes('malli') || lower.includes('moggu') || lower.includes('మల్లె') || lower.includes('మల్లి')) {
-        detectedMotif = 'jasmine';
-        detectedMotifName = 'Jasmine (మల్లె మొగ్గలు)';
-    } else if (lower.includes('peacock') || lower.includes('mayuri') || lower.includes('mayur') || lower.includes('నెమలి') || lower.includes('మయూరి')) {
-        detectedMotif = 'peacock';
-        detectedMotifName = 'Mayuri Peacock (నెమలి)';
-    } else if (lower.includes('mango') || lower.includes('paisley') || lower.includes('kalka') || lower.includes('ambi') || lower.includes('మామిడి') || lower.includes('కల్కా') || lower.includes('పైస్లే')) {
-        detectedMotif = 'mango';
-        detectedMotifName = 'Mango / Paisley (మామిడి / కల్కా)';
-    } else if (lower.includes('parrot') || lower.includes('kili') || lower.includes('chiluka') || lower.includes('చిలుక') || lower.includes('రామచిలుక')) {
-        detectedMotif = 'parrot';
-        detectedMotifName = 'Kili Parrot (రామచిలుక)';
-    } else if (lower.includes('temple motif') || lower.includes('gopuram motif') || lower.includes('గోపురం మోటిఫ్') || (lower.includes('gopuram') && !lower.includes('border') && !lower.includes('బోర్డర్'))) {
-        detectedMotif = 'temple';
-        detectedMotifName = 'Temple Gopuram (గోపురం)';
-    } else if (lower.includes('elephant') || lower.includes('gaja') || lower.includes('hathi') || lower.includes('ఏనుగు') || lower.includes('గజ')) {
-        detectedMotif = 'elephant';
-        detectedMotifName = 'Regal Elephant (ఏనుగు / గజ)';
-    } else if (lower.includes('swan') || lower.includes('hamsa') || lower.includes('హంస')) {
-        detectedMotif = 'swan';
-        detectedMotifName = 'Hamsa Swan (హంస)';
-    } else if (lower.includes('ikat diamond') || lower.includes('double ikat') || lower.includes('geometric diamond') || lower.includes('ఇకత్ డైమండ్')) {
-        detectedMotif = 'ikat';
-        detectedMotifName = 'Geometric Ikat Diamond (ఇకత్)';
-    } else if (lower.includes('leaves') || lower.includes('vine') || lower.includes('vines') || lower.includes('lata') || lower.includes('తీగ') || lower.includes('ఆకు')) {
-        detectedMotif = 'leaves';
-        detectedMotifName = 'Leaves & Vines (ఆకులు & తీగలు)';
-    } else if (lower.includes('lotus') || lower.includes('kamala') || lower.includes('తామర') || lower.includes('కమలం') || lower.includes('కమల') || lower.includes('floral motif') || lower.includes('flower motif') || lower.includes('పూల మోటిఫ్')) {
-        detectedMotif = 'lotus';
-        detectedMotifName = 'Lotus (తామర)';
+    nonOverlappingMotifs.forEach(occ => {
+        const afterText = lower.slice(occ.index + occ.length, Math.min(lower.length, occ.index + occ.length + 35));
+        const beforeText = lower.slice(Math.max(0, occ.index - 35), occ.index);
+        const surrounding = beforeText + " " + occ.keyword + " " + afterText;
+
+        const isBorder = /(?:border|anchu|kaddi|బోర్డర్|అంచు)/i.test(surrounding);
+        const isPallu = /(?:pallu|kongu|పల్లూ|కొంగు)/i.test(surrounding);
+        const isBody = /(?:body|all over|butti|buttis|fabric|saree|బాడీ|చీర|అంతా)/i.test(surrounding);
+
+        if (isBorder && !borderMotif) {
+            borderMotif = occ.motifId;
+        } else if (isPallu && !palluMotif) {
+            palluMotif = occ.motifId;
+        } else if (isBody && !bodyMotif) {
+            bodyMotif = occ.motifId;
+        } else if (!detectedMotif) {
+            detectedMotif = occ.motifId;
+            detectedMotifName = occ.name;
+        }
+    });
+
+    if (!detectedMotif) {
+        detectedMotif = bodyMotif || borderMotif || palluMotif || null;
+        if (detectedMotif) {
+            const foundDef = MOTIF_DEFINITIONS.find(m => m.id === detectedMotif);
+            detectedMotifName = foundDef ? foundDef.name : detectedMotif;
+        }
     }
 
-    // Default motif respecting the selected Andhra tradition if not specified by user
+    const userRequestedMotif = detectedMotif;
+
+    // Default motif respecting the selected Andhra tradition ONLY if not specified by user
     if (!detectedMotif) {
         if (effLower.includes('mangalagiri')) {
             detectedMotif = 'temple';
@@ -1440,6 +1770,9 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
         }
     }
 
+    if (!bodyMotif) bodyMotif = detectedMotif;
+    if (!palluMotif) palluMotif = detectedMotif;
+
     // 4. Exact Contextual Color Extraction for Body, Border, Pallu, and Motif
     let foundOccurrences = [];
     const textToSearch = userSpeech.length > 0 ? userSpeech.toLowerCase() : lower;
@@ -1451,13 +1784,13 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
                 const idx = textToSearch.indexOf(kw, startPos);
                 if (idx === -1) break;
 
-                // Word boundary check for accurate keyword isolation
                 const isWordStart = idx === 0 || /[\s,.;:!?'"()/\-]/.test(textToSearch[idx - 1]);
                 const endIdx = idx + kw.length;
                 const isWordEnd = endIdx === textToSearch.length || /[\s,.;:!?'"()/\-]/.test(textToSearch[endIdx]);
 
-                // Avoid false positive: "rose" flower as pink color
-                const isRoseFlower = kw === 'rose' && (detectedMotif === 'rose' && !textToSearch.includes('rose pink') && !textToSearch.includes('rose color') && !textToSearch.includes('rose colour') && !textToSearch.includes('rose saree') && !textToSearch.includes('rose body'));
+                const isRoseFlower = (kw === 'rose' || kw === 'గులాబీ') && 
+                    (detectedMotif === 'rose' || bodyMotif === 'rose' || borderMotif === 'rose' || palluMotif === 'rose') &&
+                    !textToSearch.includes('rose pink') && !textToSearch.includes('rose color') && !textToSearch.includes('rose colour') && !textToSearch.includes('గులాబీ రంగు') && !textToSearch.includes('గులాబి రంగు');
 
                 if (isWordStart && isWordEnd && !isRoseFlower) {
                     foundOccurrences.push({
@@ -1472,11 +1805,7 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
         });
     });
 
-    // Sort by position and keep longest match for overlapping substrings
-    foundOccurrences.sort((a, b) => {
-        if (a.index !== b.index) return a.index - b.index;
-        return b.length - a.length;
-    });
+    foundOccurrences.sort((a, b) => a.index !== b.index ? a.index - b.index : b.length - a.length);
 
     let nonOverlapping = [];
     for (let occ of foundOccurrences) {
@@ -1495,9 +1824,7 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
     let userMotifColor = null;
 
     nonOverlapping.forEach(occ => {
-        // Immediate text right after the color (up to 30 chars)
         const afterText = textToSearch.slice(occ.index + occ.length, Math.min(textToSearch.length, occ.index + occ.length + 30));
-        // Immediate text right before the color (up to 30 chars)
         const beforeText = textToSearch.slice(Math.max(0, occ.index - 30), occ.index);
 
         const afterIsBody = /^\s*(?:color\s+|colour\s+|రంగు\s+)?(?:body|saree|fabric|బాడీ|చీర)/i.test(afterText);
@@ -1509,8 +1836,8 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
         const afterIsPallu = /^\s*(?:color\s+|colour\s+|రంగు\s+)?(?:pallu|kongu|పల్లూ|కొంగు)/i.test(afterText);
         const beforeIsPallu = /(?:pallu|kongu|పల్లూ|కొంగు)\s*(?:is|in|of|color|colour|రంగు|:)?\s*$/i.test(beforeText);
 
-        const afterIsMotif = /^\s*(?:color\s+|colour\s+|రంగు\s+)?(?:motif|zari|butti|flower|peacock|lotus|rose|jasmine|sunflower|mango|paisley|parrot|elephant|swan|మోటిఫ్|జరీ|బుటా|పువ్వు|నెమలి|తామర|గులాబీ|మల్లె|సూర్యకాంతి|మామిడి|చిలుక)/i.test(afterText);
-        const beforeIsMotif = /(?:motif|zari|మోటిఫ్|జరీ)\s*(?:is|in|of|color|colour|రంగు|:)?\s*$/i.test(beforeText);
+        const afterIsMotif = /^\s*(?:color\s+|colour\s+|రంగు\s+)?(?:motif|motifs|zari|butti|buttis|flower|peacock|lotus|rose|jasmine|sunflower|mango|paisley|parrot|elephant|swan|మోటిఫ్|జరీ|బుటా|పువ్వు|నెమలి|తామర|గులాబీ|మల్లె|సూర్యకాంతి|మామిడి|చిలుక)/i.test(afterText);
+        const beforeIsMotif = /(?:motif|motifs|zari|మోటిఫ్|జరీ)\s*(?:is|in|of|color|colour|రంగు|:)?\s*$/i.test(beforeText);
 
         if (afterIsMotif || beforeIsMotif) {
             occ.role = 'motif';
@@ -1618,10 +1945,10 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
 
     // 6. Border Style Detection (Respecting user request or Andhra tradition)
     let borderStyle = "double_zari";
-    if (lower.includes('temple border') || lower.includes('gopuram border') || lower.includes('గోపురం బోర్డర్') || lower.includes('temple spikes') || lower.includes('గోపురం అంచు')) {
-        borderStyle = "temple";
-    } else if (lower.includes('peacock border') || lower.includes('నెమలి బోర్డర్') || lower.includes('నెమలి అంచు')) {
+    if (borderMotif === 'peacock' || lower.includes('peacock border') || lower.includes('నెమలి బోర్డర్') || lower.includes('నెమలి అంచు')) {
         borderStyle = "peacock_border";
+    } else if (lower.includes('temple border') || lower.includes('gopuram border') || lower.includes('గోపురం బోర్డర్') || lower.includes('temple spikes') || lower.includes('గోపురం అంచు')) {
+        borderStyle = "temple";
     } else if (lower.includes('ikat wave') || lower.includes('wave border') || lower.includes('ఇకత్ బోర్డర్') || lower.includes('తరంగాలు')) {
         borderStyle = "ikat_wave";
     } else if (lower.includes('chevron') || lower.includes('zig') || lower.includes('జిగ్')) {
@@ -1632,6 +1959,8 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
         borderStyle = "double_zari";
     } else if (lower.includes('temple') || lower.includes('గోపురం')) {
         borderStyle = "temple";
+    } else if (borderMotif) {
+        borderStyle = (borderMotif === 'peacock') ? "peacock_border" : "double_zari";
     } else {
         if (effLower.includes('mangalagiri')) borderStyle = "temple";
         else if (effLower.includes('uppada')) borderStyle = "double_zari";
@@ -1643,7 +1972,7 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
 
     // 7. Body Pattern Detection (Respecting user request or Andhra tradition)
     let bodyPattern = "floral_vines";
-    if (lower.includes('check') || lower.includes('kattam') || lower.includes('గడులు') || lower.includes('గళ్ళు')) {
+    if (lower.includes('check') || lower.includes('kattam') || lower.includes('గడులు') || lower.includes('గళ్ళు') || lower.includes('చెక్స్') || lower.includes('geometric')) {
         bodyPattern = "checks";
     } else if (lower.includes('lattice') || lower.includes('jaal') || lower.includes('వల')) {
         bodyPattern = "lattice";
@@ -1670,7 +1999,7 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
 
     // 8. Pallu Style Detection (Respecting user request or Andhra tradition)
     let palluStyle = "grand_medallion";
-    if (lower.includes('floral pallu') || lower.includes('పూల కొంగు')) {
+    if (palluMotif || lower.includes('floral pallu') || lower.includes('పూల కొంగు') || lower.includes('పల్లూ లో') || lower.includes('కొంగు లో')) {
         palluStyle = "decorative_pallu";
     } else if (lower.includes('temple pallu') || lower.includes('cascade') || lower.includes('గోపురాలు') || lower.includes('గోపురాల కొంగు')) {
         palluStyle = "cascade_temple";
@@ -1745,6 +2074,10 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
         style: { nameEn: effectiveStyle, nameTe: effectiveStyle },
         colors: { body: finalBodyColor, border: finalBorderColor, pallu: finalPalluColor, zari: finalZariColor, paletteName: paletteLabel },
         motif: { id: detectedMotif, en: (detectedMotifName || detectedMotif).toUpperCase(), te: detectedMotif },
+        bodyMotif: bodyMotif || detectedMotif,
+        borderMotif: borderMotif || (borderStyle === 'peacock_border' ? 'peacock' : null),
+        palluMotif: palluMotif || detectedMotif,
+        userRequestedMotif: userRequestedMotif,
         bodyPattern: bodyPattern,
         borderStyle: borderStyle,
         palluStyle: palluStyle,
@@ -1758,7 +2091,8 @@ function fallbackClientAISuggestions(promptText, seed = 0, explicitUserText = ''
         color: paletteLabel,
         motif: (detectedMotifName || detectedMotif).toUpperCase(),
         border: borderStyle.replace(/_/g, ' ').toUpperCase(),
-        style: effectiveStyle
+        style: effectiveStyle,
+        userRequestedMotif: userRequestedMotif
     };
 
     applySingleAIDesign(suggestion, detectedReqs, sourceText);
@@ -1891,7 +2225,7 @@ function drawFlatSareeView(w, h, opacity = 1.0) {
     drawWeaveTexture(palluWidth, borderHeight, w - palluWidth, h - (borderHeight * 2));
 
     // 3. Draw Pallu Section (Left End)
-    drawPalluSection(ctx, 0, 0, palluWidth, h, currentDesign.palluStyle, currentDesign.palluColor, currentDesign.zariColor, currentDesign.motifType);
+    drawPalluSection(ctx, 0, 0, palluWidth, h, currentDesign.palluStyle, currentDesign.palluColor, currentDesign.zariColor, currentDesign.palluMotif || currentDesign.motifType);
 
     // 4. Top & Bottom Borders
     ctx.fillStyle = currentDesign.borderColor;
@@ -1903,7 +2237,7 @@ function drawFlatSareeView(w, h, opacity = 1.0) {
     drawBorderPattern(ctx, palluWidth, h - borderHeight, w - palluWidth, borderHeight, currentDesign.borderStyle, false);
 
     // 5. Draw Body Repeating Motifs
-    drawBodyMotifs(ctx, palluWidth, borderHeight, w - palluWidth, h - (borderHeight * 2), currentDesign.motifType, currentDesign.motifDensity, currentDesign.motifArrangement, currentDesign.zariColor);
+    drawBodyMotifs(ctx, palluWidth, borderHeight, w - palluWidth, h - (borderHeight * 2), currentDesign.bodyMotif || currentDesign.motifType, currentDesign.motifDensity, currentDesign.motifArrangement, currentDesign.zariColor);
 
     // Border Divider Zari Frame
     ctx.strokeStyle = currentDesign.zariColor;
@@ -2107,7 +2441,7 @@ function drawMotifSymbol(ctx, x, y, size, type, color) {
         ctx.closePath();
         ctx.fill();
 
-    } else if (type === 'ikat') {
+    } else if (type === 'ikat' || type === 'geometric') {
         // Pochampally Stepped Diamond with Cross Star
         const s = size / 24;
 
@@ -2182,42 +2516,107 @@ function drawMotifSymbol(ctx, x, y, size, type, color) {
         ctx.fillRect(x - 1 * s, y - 3 * s, 6 * s, 6 * s);
 
     } else if (type === 'rose') {
-        // Authentic Indian Gulab Rosette (Layered spiral petals with calyx leaves)
+        // Authentic Layered Handloom Gulab Rosette (Concentric cup petals, spiral whorl, sepals & calyx)
         const s = size / 24;
 
-        // Outer petals
+        // 1. Pointed Rose Sepals / Calyx Leaves peeking out behind petals
         ctx.beginPath();
-        ctx.arc(x, y, 9 * s, 0, Math.PI * 2);
+        // Sepal 1 (bottom left)
+        ctx.moveTo(x - 2 * s, y + 4 * s);
+        ctx.quadraticCurveTo(x - 10 * s, y + 10 * s, x - 12 * s, y + 5 * s);
+        ctx.quadraticCurveTo(x - 7 * s, y + 2 * s, x - 2 * s, y + 4 * s);
+        // Sepal 2 (bottom right)
+        ctx.moveTo(x + 2 * s, y + 4 * s);
+        ctx.quadraticCurveTo(x + 10 * s, y + 10 * s, x + 12 * s, y + 5 * s);
+        ctx.quadraticCurveTo(x + 7 * s, y + 2 * s, x + 2 * s, y + 4 * s);
+        // Sepal 3 (top)
+        ctx.moveTo(x, y - 4 * s);
+        ctx.quadraticCurveTo(x - 3 * s, y - 11 * s, x, y - 12 * s);
+        ctx.quadraticCurveTo(x + 3 * s, y - 11 * s, x, y - 4 * s);
+        ctx.closePath();
         ctx.fill();
 
-        // 5 overlapping petal lobes
-        for (let a = 0; a < Math.PI * 2; a += Math.PI * 2 / 5) {
-            const px = x + Math.cos(a) * 6 * s;
-            const py = y + Math.sin(a) * 6 * s;
+        // 2. Outer Tier Petals: 5 scalloped cupped petals with cleft margins
+        for (let i = 0; i < 5; i++) {
+            const angle = (i * 2 * Math.PI / 5) - Math.PI / 2;
+            const nextAngle = ((i + 1) * 2 * Math.PI / 5) - Math.PI / 2;
+            const midAngle = angle + Math.PI / 5;
+            
+            const p1x = x + Math.cos(angle) * 7.5 * s;
+            const p1y = y + Math.sin(angle) * 7.5 * s;
+            const p2x = x + Math.cos(nextAngle) * 7.5 * s;
+            const p2y = y + Math.sin(nextAngle) * 7.5 * s;
+            const tipX = x + Math.cos(midAngle) * 11 * s;
+            const tipY = y + Math.sin(midAngle) * 11 * s;
+
             ctx.beginPath();
-            ctx.arc(px, py, 4.5 * s, 0, Math.PI * 2);
+            ctx.moveTo(x + Math.cos(angle) * 3 * s, y + Math.sin(angle) * 3 * s);
+            ctx.quadraticCurveTo(p1x, p1y, tipX, tipY);
+            ctx.quadraticCurveTo(p2x, p2y, x + Math.cos(nextAngle) * 3 * s, y + Math.sin(nextAngle) * 3 * s);
+            ctx.closePath();
             ctx.fill();
+
+            // Petal cleft and fold highlight
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.lineWidth = Math.max(1, 1.2 * s);
+            ctx.beginPath();
+            ctx.moveTo(tipX, tipY);
+            ctx.lineTo(x + Math.cos(midAngle) * 8.5 * s, y + Math.sin(midAngle) * 8.5 * s);
+            ctx.stroke();
+            ctx.strokeStyle = color;
         }
 
-        // Inner petal contrast ring
-        ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
-        ctx.lineWidth = 1.5 * s;
+        // 3. Middle Tier Overlapping Petals (staggered)
+        for (let i = 0; i < 5; i++) {
+            const midAngle = (i * 2 * Math.PI / 5) - Math.PI / 2 + Math.PI / 5;
+            const tipX = x + Math.cos(midAngle) * 7.5 * s;
+            const tipY = y + Math.sin(midAngle) * 7.5 * s;
+            
+            ctx.beginPath();
+            ctx.arc(tipX, tipY, 3.8 * s, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+            ctx.lineWidth = Math.max(1, 1.2 * s);
+            ctx.beginPath();
+            ctx.arc(tipX, tipY, 3.8 * s, midAngle - 1.2, midAngle + 1.2);
+            ctx.stroke();
+            ctx.strokeStyle = color;
+        }
+
+        // 4. Center Rosebud Core: Tight spiraling whorl / rosette swirl
+        ctx.fillStyle = color;
         ctx.beginPath();
-        ctx.arc(x, y, 5 * s, 0.3, Math.PI * 1.8);
+        ctx.arc(x, y, 4.5 * s, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Distinct spiral whorl of the rosebud opening
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.45)";
+        ctx.lineWidth = Math.max(1, 1.4 * s);
+        ctx.beginPath();
+        for (let t = 0; t < Math.PI * 3.5; t += 0.2) {
+            const r = (0.6 + t * 0.95) * s;
+            const sx = x + Math.cos(t) * r;
+            const sy = y + Math.sin(t) * r;
+            if (t === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+        }
         ctx.stroke();
 
-        // Central tight rosebud whorl
-        ctx.beginPath();
-        ctx.arc(x, y, 2.2 * s, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Calyx sepals at base
+        // 5. Delicate rose stem & leaflet at bottom base
         ctx.strokeStyle = color;
-        ctx.lineWidth = 1.8;
+        ctx.lineWidth = Math.max(1, 1.6 * s);
         ctx.beginPath();
-        ctx.moveTo(x - 6 * s, y + 8 * s);
-        ctx.quadraticCurveTo(x, y + 12 * s, x + 6 * s, y + 8 * s);
+        ctx.moveTo(x, y + 8 * s);
+        ctx.quadraticCurveTo(x + 1 * s, y + 12 * s, x + 3 * s, y + 14 * s);
         ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(x + 1.5 * s, y + 11 * s);
+        ctx.quadraticCurveTo(x + 6 * s, y + 10 * s, x + 7 * s, y + 12 * s);
+        ctx.quadraticCurveTo(x + 4 * s, y + 13 * s, x + 1.5 * s, y + 11 * s);
+        ctx.closePath();
+        ctx.fill();
 
     } else if (type === 'jasmine') {
         // Authentic Malli Moggu (Jasmine 5-Petal Star Flower with Delicate Buds)
@@ -2560,7 +2959,19 @@ function drawBorderPattern(ctx, x, y, width, height, style, isTop) {
     const startY = isTop ? y + height : y;
     const dir = isTop ? -1 : 1;
 
-    if (style === 'temple') {
+    const explicitBorderMotif = currentDesign.borderMotif || (style === 'peacock_border' ? 'peacock' : (style && style.endsWith('_border') ? style.replace('_border', '') : null));
+
+    if (explicitBorderMotif) {
+        // Row of Regal Repeating Motifs between fine framing zari bars
+        ctx.fillRect(x, isTop ? y + 4 : y + height - 8, width, 3);
+        ctx.fillRect(x, isTop ? y + height - 7 : y + 4, width, 3);
+
+        const midY = y + height / 2;
+        const spacing = (explicitBorderMotif === 'peacock' || explicitBorderMotif === 'elephant') ? 38 : 34;
+        for (let px = x + 20; px < x + width - 20; px += spacing) {
+            drawMotifSymbol(ctx, px, midY, 15, explicitBorderMotif, currentDesign.zariColor);
+        }
+    } else if (style === 'temple') {
         // Nizam Gopuram Stepped Spikes with Pearl (Mottu) Band
         const spikeW = 20;
         const spikeH = 22;
@@ -2721,11 +3132,12 @@ function drawPalluSection(ctx, x, y, width, height, palluStyle, palluColor, zari
         ctx.arc(centerX, centerY, 6, 0, Math.PI * 2);
         ctx.fill();
 
-        // 4 Corner Paisley Kalkas filling the Pallu
-        drawMotifSymbol(ctx, x + 40, y + 60, 32, 'mango', zariColor);
-        drawMotifSymbol(ctx, x + width - 40, y + 60, 32, 'mango', zariColor);
-        drawMotifSymbol(ctx, x + 40, height - 60, 32, 'mango', zariColor);
-        drawMotifSymbol(ctx, x + width - 40, height - 60, 32, 'mango', zariColor);
+        // 4 Corner Motifs filling the Pallu
+        const cornerMotif = motifType || 'mango';
+        drawMotifSymbol(ctx, x + 40, y + 60, 32, cornerMotif, zariColor);
+        drawMotifSymbol(ctx, x + width - 40, y + 60, 32, cornerMotif, zariColor);
+        drawMotifSymbol(ctx, x + 40, height - 60, 32, cornerMotif, zariColor);
+        drawMotifSymbol(ctx, x + width - 40, height - 60, 32, cornerMotif, zariColor);
 
     } else if (palluStyle === 'decorative_pallu') {
         // 3-Tier Multi-Paneled Decorative Floral & Peacock Pallu
@@ -2876,7 +3288,7 @@ function drawDrapedSareeView(w, h) {
         ctx.fillRect(px + (i * 12), h - 28, 40, 10);
 
         // Pleat Motif
-        drawMotifSymbol(ctx, px + 20, h / 2 + (i * 10), 18, currentDesign.motifType, currentDesign.zariColor);
+        drawMotifSymbol(ctx, px + 20, h / 2 + (i * 10), 18, currentDesign.bodyMotif || currentDesign.motifType, currentDesign.zariColor);
     }
 
     ctx.fillStyle = "rgba(0, 0, 0, 0.65)";

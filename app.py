@@ -185,32 +185,138 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
         (["chocolate brown", "copper", "brown", "గోధుమ", "రాగి"], "#78350F", "Chocolate Brown")
     ]
 
-    # 2. Primary Motif Detection (Recognizing sunflower, rose, lotus, jasmine, peacock, mango, etc.)
+    # 2. Comprehensive Handloom Motif Catalog with English & Telugu Names & Placements
+    MOTIF_DEFINITIONS = [
+        ("rose", MOTIF_CATALOG[1], [
+            "rose motif", "rose motifs", "rose flower", "rose flowers", "rose butti", "rose buttis", 
+            "roses", "rosebud", "gulabi", "గులాబీ పువ్వు", "గులాబీ మోటిఫ్", "గులాబి పువ్వు", 
+            "గులాబీలు", "గులాబి", "గులాబీ"
+        ]),
+        ("lotus", MOTIF_CATALOG[0], [
+            "lotus", "lotuses", "kamala", "kamal", "padma", "తామర పువ్వు", "కమలం", "తామర", 
+            "కమల", "పద్మం", "తామర పూవు", "పూలు", "పూల మోటిఫ్"
+        ]),
+        ("jasmine", MOTIF_CATALOG[2], [
+            "jasmine", "malle moggu", "malli moggu", "malle", "malli", "moggu", "chameli", 
+            "mallipoo", "మల్లె మొగ్గలు", "మల్లె మొగ్గ", "మల్లెపువ్వు", "మల్లెలు", "మల్లె", "మల్లి"
+        ]),
+        ("sunflower", MOTIF_CATALOG[3], [
+            "sunflower", "sunflowers", "surajmukhi", "suryakanthi", "సూర్యకాంతి పువ్వు", 
+            "సూర్యకాంతి", "పొద్దుతిరుగుడు"
+        ]),
+        ("peacock", MOTIF_CATALOG[4], [
+            "peacock", "peacocks", "mayuri", "mayur", "mor", "నెమలి", "నెమళ్ళు", 
+            "మయూరి", "మయూరం"
+        ]),
+        ("mango", MOTIF_CATALOG[5], [
+            "mango motif", "mango motifs", "mango", "paisley", "paisleys", "kalka", "ambi", 
+            "keri", "మామిడి పిందె", "మామిడి పిందే", "మామిడి", "కల్కా", "పైస్లే"
+        ]),
+        ("parrot", MOTIF_CATALOG[6], [
+            "parrot", "parrots", "kili", "chiluka", "ramachiluka", "tota", "రామచిలుక", 
+            "చిలుకలు", "చిలుక"
+        ]),
+        ("temple", MOTIF_CATALOG[7], [
+            "temple motif", "temple gopuram", "gopuram motif", "spire", "గోపురం మోటిఫ్", 
+            "గోపురం", "గోపురాలు", "కోవెల"
+        ]),
+        ("ikat", MOTIF_CATALOG[8], [
+            "geometric ikat", "ikat diamond", "double ikat", "geometric pattern", 
+            "geometric patterns", "geometric design", "geometric motif", "geometric", 
+            "geometry", "ఇకత్ డైమండ్", "ఇకత్", "రేఖాగణిత నమూనా", "రేఖాగణిత"
+        ]),
+        ("leaves", MOTIF_CATALOG[9], [
+            "leaves and vines", "leaves & vines", "leaf motif", "leaves", "leaf", "vine", 
+            "vines", "lata", "creeper", "creepers", "ఆకులు & తీగలు", "తీగలు", "ఆకులు", 
+            "తీగ", "ఆకు", "లత"
+        ]),
+        ("elephant", MOTIF_CATALOG[10], [
+            "elephant", "elephants", "gaja", "hathi", "ఏనుగు", "ఏనుగులు", "గజ"
+        ]),
+        ("swan", MOTIF_CATALOG[11], [
+            "swan", "swans", "hamsa", "హంస", "హంసలు"
+        ])
+    ]
+
+    found_motif_spans = []
+    for motif_id, catalog_item, keywords in MOTIF_DEFINITIONS:
+        for kw in keywords:
+            start_pos = 0
+            while True:
+                idx = prompt_lower.find(kw, start_pos)
+                if idx == -1:
+                    break
+                is_word_start = (idx == 0) or prompt_lower[idx - 1] in " ,.;:!?\"'()/-"
+                end_idx = idx + len(kw)
+                is_word_end = (end_idx == len(prompt_lower)) or prompt_lower[end_idx] in " ,.;:!?\"'()/-"
+
+                is_only_rose_pink = (kw in ['rose', 'గులాబీ']) and \
+                    any(c in prompt_lower for c in ['rose pink', 'rose color', 'rose colour', 'గులాబీ రంగు', 'గులాబి రంగు']) and \
+                    not any(m in prompt_lower for m in ['rose motif', 'rose flower', 'rose butti', 'roses', 'గులాబీ పువ్వు', 'గులాబీలు'])
+
+                if is_word_start and is_word_end and not is_only_rose_pink:
+                    found_motif_spans.append({
+                        "motif_id": motif_id,
+                        "catalog_item": catalog_item,
+                        "keyword": kw,
+                        "index": idx,
+                        "length": len(kw)
+                    })
+                start_pos = idx + len(kw)
+
+        # Standalone "rose" check with boundary
+        if motif_id == "rose" and re.search(r'\brose\b', prompt_lower):
+            has_color = any(c in prompt_lower for c in ['rose pink', 'rose color', 'rose colour'])
+            has_explicit = any(m in prompt_lower for m in ['rose motif', 'rose flower', 'rose butti', 'roses'])
+            if not has_color or has_explicit:
+                match = re.search(r'\brose\b', prompt_lower)
+                if match and not any(o["motif_id"] == "rose" for o in found_motif_spans):
+                    found_motif_spans.append({
+                        "motif_id": "rose",
+                        "catalog_item": catalog_item,
+                        "keyword": "rose",
+                        "index": match.start(),
+                        "length": 4
+                    })
+
+    found_motif_spans.sort(key=lambda x: (x["index"], -x["length"]))
+    non_overlapping_motifs = []
+    for occ in found_motif_spans:
+        overlaps = any(
+            (occ["index"] >= prev["index"] and occ["index"] < prev["index"] + prev["length"]) or
+            (prev["index"] >= occ["index"] and prev["index"] < occ["index"] + occ["length"])
+            for prev in non_overlapping_motifs
+        )
+        if not overlaps:
+            non_overlapping_motifs.append(occ)
+
+    border_motif = None
+    pallu_motif = None
+    body_motif = None
     primary_motif = None
-    if any(k in prompt_lower for k in ['sunflower', 'surajmukhi', 'suryakanthi', 'సూర్యకాంతి', 'పొద్దుతిరుగుడు']):
-        primary_motif = MOTIF_CATALOG[3] # Sunflower
-    elif any(k in prompt_lower for k in ['rose motif', 'rose flower', 'గులాబీ పువ్వు', 'గులాబీ మోటిఫ్']) or ('rose' in prompt_lower and not any(k in prompt_lower for k in ['rose pink', 'rose color', 'rose saree', 'rose body'])):
-        primary_motif = MOTIF_CATALOG[1] # Rose
-    elif any(k in prompt_lower for k in ['jasmine', 'malle', 'malli', 'moggu', 'మల్లె', 'మల్లి']):
-        primary_motif = MOTIF_CATALOG[2] # Jasmine
-    elif any(k in prompt_lower for k in ['peacock', 'mayuri', 'mayur', 'నెమలి', 'మయూరి']):
-        primary_motif = MOTIF_CATALOG[4] # Peacock
-    elif any(k in prompt_lower for k in ['mango', 'paisley', 'kalka', 'ambi', 'మామిడి', 'కల్కా', 'పైస్లే']):
-        primary_motif = MOTIF_CATALOG[5] # Mango / Paisley
-    elif any(k in prompt_lower for k in ['parrot', 'kili', 'chiluka', 'చిలుక']):
-        primary_motif = MOTIF_CATALOG[6] # Parrot
-    elif any(k in prompt_lower for k in ['temple motif', 'gopuram motif', 'గోపురం మోటిఫ్']) or ('temple' in prompt_lower and 'border' not in prompt_lower and 'బోర్డర్' not in prompt_lower):
-        primary_motif = MOTIF_CATALOG[7] # Temple
-    elif any(k in prompt_lower for k in ['elephant', 'gaja', 'hathi', 'ఏనుగు', 'గజ']):
-        primary_motif = MOTIF_CATALOG[10] # Elephant
-    elif any(k in prompt_lower for k in ['ikat diamond', 'double ikat', 'geometric diamond', 'ఇకత్']):
-        primary_motif = MOTIF_CATALOG[8] # Ikat
-    elif any(k in prompt_lower for k in ['leaves', 'vine', 'vines', 'lata', 'తీగలు', 'తీగ', 'ఆకులు', 'ఆకు']):
-        primary_motif = MOTIF_CATALOG[9] # Leaves & Vines
-    elif any(k in prompt_lower for k in ['swan', 'hamsa', 'హంస']):
-        primary_motif = MOTIF_CATALOG[11] # Swan
-    elif any(k in prompt_lower for k in ['lotus', 'kamala', 'తామర', 'కమలం', 'floral motif', 'flower motif', 'పూలు']):
-        primary_motif = MOTIF_CATALOG[0] # Lotus
+
+    for occ in non_overlapping_motifs:
+        before_win = prompt_lower[max(0, occ["index"] - 35):occ["index"]]
+        after_win = prompt_lower[occ["index"] + occ["length"]:min(len(prompt_lower), occ["index"] + occ["length"] + 35)]
+        comb = before_win + " " + occ["keyword"] + " " + after_win
+
+        is_border = any(k in comb for k in ['border', 'anchu', 'kaddi', 'బోర్డర్', 'అంచు'])
+        is_pallu = any(k in comb for k in ['pallu', 'kongu', 'పల్లూ', 'కొంగు'])
+        is_body = any(k in comb for k in ['body', 'all over', 'butti', 'buttis', 'fabric', 'saree', 'బాడీ', 'చీర', 'అంతా'])
+
+        if is_border and not border_motif:
+            border_motif = occ["catalog_item"]
+        elif is_pallu and not pallu_motif:
+            pallu_motif = occ["catalog_item"]
+        elif is_body and not body_motif:
+            body_motif = occ["catalog_item"]
+        elif not primary_motif:
+            primary_motif = occ["catalog_item"]
+
+    if not primary_motif:
+        primary_motif = body_motif or border_motif or pallu_motif
+
+    user_specified_motif = (primary_motif is not None)
 
     # 3. Andhra Pradesh Handloom Tradition Detection
     if any(k in prompt_lower for k in ['dharmavaram', 'bridal', 'kada', 'brocade', 'ధర్మవరం', 'కాడా', 'పెళ్లి పట్టు']):
@@ -232,7 +338,7 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
         style_info = HANDLOOM_STYLES[0]
         style_label = "Mangalagiri Cotton & Silk"
 
-    # Default motif from selected tradition if not specified
+    # Default motif from selected tradition only when user has not specified one
     if not primary_motif:
         if "dharmavaram" in style_label.lower():
             primary_motif = MOTIF_CATALOG[4] # Peacock
@@ -245,7 +351,12 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
         else:
             primary_motif = MOTIF_CATALOG[7] # Temple Gopuram
 
-    # 4. Contextual Color Extraction for Body, Border, and Motif
+    if not body_motif:
+        body_motif = primary_motif
+    if not pallu_motif:
+        pallu_motif = primary_motif
+
+    # 4. Contextual Color Extraction for Body, Border, Pallu, and Motif
     found_occurrences = []
     for keywords, hex_val, color_name in COLOR_DEFS:
         for kw in keywords:
@@ -258,8 +369,8 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
                 end_idx = idx + len(kw)
                 is_word_end = (end_idx == len(prompt_lower)) or prompt_lower[end_idx] in " ,.;:!?\"'()/-"
 
-                # Avoid false positive of 'rose' flower as pink color
-                is_rose_flower = (kw == 'rose' and primary_motif['id'] == 'rose' and not any(k in prompt_lower for k in ['rose pink', 'rose color', 'rose saree', 'rose body']))
+                is_rose_flower = (kw in ['rose', 'గులాబీ']) and (primary_motif['id'] == 'rose' or (body_motif and body_motif['id'] == 'rose')) and \
+                    not any(k in prompt_lower for k in ['rose pink', 'rose color', 'rose colour', 'గులాబీ రంగు', 'గులాబి రంగు'])
 
                 if is_word_start and is_word_end and not is_rose_flower:
                     found_occurrences.append({
@@ -283,6 +394,7 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
 
     user_body = None
     user_border = None
+    user_pallu = None
     user_motif_color = None
 
     for occ in non_overlapping:
@@ -290,14 +402,17 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
         after_win = prompt_lower[occ["index"] + occ["length"]:min(len(prompt_lower), occ["index"] + occ["length"] + 35)]
         comb = before_win + " " + after_win
 
-        is_motif_ctx = any(k in comb for k in ['motif', 'zari', 'butti', 'flower', 'sunflower', 'rose', 'lotus', 'jasmine', 'peacock', 'mango', 'మోటిఫ్', 'జరీ', 'పువ్వు'])
+        is_motif_ctx = any(k in comb for k in ['motif', 'motifs', 'zari', 'butti', 'buttis', 'flower', 'మోటిఫ్', 'జరీ', 'పువ్వు'])
         is_border_ctx = any(k in comb for k in ['border', 'anchu', 'kaddi', 'బోర్డర్', 'అంచు'])
+        is_pallu_ctx = any(k in comb for k in ['pallu', 'kongu', 'పల్లూ', 'కొంగు'])
         is_body_ctx = any(k in comb for k in ['body', 'saree body', 'saree', 'fabric', 'బాడీ', 'చీర'])
 
         if is_motif_ctx and not user_motif_color:
             user_motif_color = occ
         elif is_border_ctx and not user_border:
             user_border = occ
+        elif is_pallu_ctx and not user_pallu:
+            user_pallu = occ
         elif is_body_ctx and not user_body:
             user_body = occ
         else:
@@ -313,11 +428,13 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
 
     body_hex = user_body["hex"] if user_body else style_info["defaultBody"]
     border_hex = user_border["hex"] if user_border else style_info["defaultBorder"]
-    pallu_hex = border_hex
+    pallu_hex = user_pallu["hex"] if user_pallu else border_hex
     zari_hex = user_motif_color["hex"] if user_motif_color else "#FBBF24"
 
     if "silver" in prompt_lower or "వెండి" in prompt_lower:
         zari_hex = "#E2E8F0"
+
+    body_name = user_body["name"] if user_body else style_info["nameEn"]
 
     if user_body and user_border:
         palette_label = f"{user_body['name']} Body & {user_border['name']} Border"
@@ -328,25 +445,79 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
     else:
         palette_label = f"{style_label} Heritage Weave"
 
-    # Define 3 distinct variation presets (rotated by seed)
+    # User Pattern preferences
+    user_border_style = "temple" if "temple" in style_label.lower() else "double_zari"
+    if (border_motif and border_motif["id"] == "peacock") or any(k in prompt_lower for k in ['peacock border', 'నెమలి బోర్డర్', 'నెమలి అంచు']):
+        user_border_style = "peacock_border"
+    elif any(k in prompt_lower for k in ['temple border', 'gopuram border', 'గోపురం బోర్డర్', 'temple spikes']):
+        user_border_style = "temple"
+    elif any(k in prompt_lower for k in ['ikat wave', 'wave border', 'ఇకత్ బోర్డర్']):
+        user_border_style = "ikat_wave"
+    elif any(k in prompt_lower for k in ['chevron', 'zig', 'జిగ్']):
+        user_border_style = "chevron_pattern"
+    elif any(k in prompt_lower for k in ['stripe', 'గీతల బోర్డర్']):
+        user_border_style = "zari_stripes"
+    elif border_motif:
+        user_border_style = f"{border_motif['id']}_border" if border_motif['id'] == 'peacock' else "double_zari"
+
+    user_body_pattern = "checks" if "mangalagiri" in style_label.lower() else "floral_vines"
+    if any(k in prompt_lower for k in ['check', 'kattam', 'గడులు', 'గళ్ళు', 'చెక్స్', 'geometric']):
+        user_body_pattern = "checks"
+    elif any(k in prompt_lower for k in ['lattice', 'jaal', 'వల']):
+        user_body_pattern = "lattice"
+    elif any(k in prompt_lower for k in ['paisley lattice', 'మామిడి జాల్']):
+        user_body_pattern = "paisley_lattice"
+    elif any(k in prompt_lower for k in ['diagonal', 'క్రాస్']):
+        user_body_pattern = "diagonal_ikat"
+    elif any(k in prompt_lower for k in ['stripe', 'గీతలు']):
+        user_body_pattern = "stripes"
+    elif any(k in prompt_lower for k in ['butti', 'బుటాలు', 'chalu']):
+        user_body_pattern = "scattered_buttis"
+    elif any(k in prompt_lower for k in ['solid', 'plain', 'సాదా']):
+        user_body_pattern = "solid"
+    elif any(k in prompt_lower for k in ['floral vines', 'vines', 'తీగలు']):
+        user_body_pattern = "floral_vines"
+
+    user_pallu_style = "grand_medallion"
+    if pallu_motif or any(k in prompt_lower for k in ['floral pallu', 'పూల కొంగు', 'పల్లూ లో', 'కొంగు లో']):
+        user_pallu_style = "decorative_pallu"
+    elif any(k in prompt_lower for k in ['temple pallu', 'cascade', 'గోపురాలు']):
+        user_pallu_style = "cascade_temple"
+    elif any(k in prompt_lower for k in ['traditional pallu', 'పట్టీల కొంగు', 'గీతల కొంగు']):
+        user_pallu_style = "traditional_stripes"
+    elif any(k in prompt_lower for k in ['ikat pallu', 'ఇకత్ కొంగు']):
+        user_pallu_style = "ikat_block"
+
+    # Define motif variations:
+    # If user explicitly requested a motif, preserve it across all generated variations!
+    if user_specified_motif:
+        motif_var1 = primary_motif
+        motif_var2 = primary_motif
+        motif_var3 = primary_motif
+    else:
+        motif_var1 = primary_motif
+        motif_var2 = MOTIF_CATALOG[4] if primary_motif["id"] != "peacock" else MOTIF_CATALOG[0]
+        motif_var3 = MOTIF_CATALOG[5] if primary_motif["id"] != "mango" else MOTIF_CATALOG[8]
+
+    # Define 5 distinct variation presets (rotated by seed)
     v_configs = [
         {
             "id": 1,
-            "title_en": f"Design 1: Floral Body + Temple Border + Traditional Pallu",
-            "title_te": "డిజైన్ 1: పూల తీగల బాడీ + గోపురం బోర్డర్ + సాంప్రదాయ పల్లూ",
-            "bodyPattern": "floral_vines",
-            "borderStyle": "temple",
-            "palluStyle": "traditional_stripes",
+            "title_en": f"Design 1: {user_body_pattern.replace('_', ' ').title()} Body + {user_border_style.replace('_', ' ').title()} Border",
+            "title_te": f"డిజైన్ 1: {primary_motif['te']} మోటిఫ్ మరియు సాంప్రదాయ నేత",
+            "bodyPattern": user_body_pattern,
+            "borderStyle": user_border_style,
+            "palluStyle": user_pallu_style,
             "motif": motif_var1,
             "motifArrangement": "staggered",
             "motifDensity": "Medium",
-            "layoutType": "Traditional Korvai Layout",
+            "layoutType": "Authentic Handloom Layout",
             "zariShine": zari_hex,
-            "desc": "Floral body pattern paired with classic temple gopuram border and traditional banded pallu."
+            "desc": f"Custom synthesized {primary_motif['en']} handloom design matching prompt."
         },
         {
             "id": 2,
-            "title_en": f"Design 2: Geometric Body + Zari Border + Patterned Pallu",
+            "title_en": f"Design 2: Geometric Checks + Double Zari Border + Grand Pallu",
             "title_te": "డిజైన్ 2: రేఖాగణిత గడుల బాడీ + జరీ బోర్డర్ + చక్ర పల్లూ",
             "bodyPattern": "checks",
             "borderStyle": "double_zari",
@@ -360,7 +531,7 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
         },
         {
             "id": 3,
-            "title_en": f"Design 3: Paisley Lattice + Floral Border + Decorative Pallu",
+            "title_en": f"Design 3: Diamond Lattice + Ikat Border + Decorative Pallu",
             "title_te": "డిజైన్ 3: ప్యాటర్న్ వల బాడీ + పూల బోర్డర్ + అలంకార పల్లూ",
             "bodyPattern": "lattice",
             "borderStyle": "ikat_wave",
@@ -374,7 +545,7 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
         },
         {
             "id": 4,
-            "title_en": f"Design 4: Diagonal Lines + Peacock Border + Cascading Pallu",
+            "title_en": f"Design 4: Diagonal Weave + Peacock Border + Cascading Pallu",
             "title_te": "డిజైన్ 4: క్రాస్ గీతల బాడీ + నెమలి బోర్డర్ + గోపురాల పల్లూ",
             "bodyPattern": "diagonal_ikat",
             "borderStyle": "peacock_border",
@@ -416,7 +587,6 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
 
         # Subtle variation in shade if prompt allows, keeping theme intact
         if idx == 2 and border_hex == pallu_hex:
-            # slightly deeper pallu shade
             v_pallu_hex = border_hex
 
         weaver_specs = {
@@ -448,6 +618,10 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
                 "paletteName": palette_label
             },
             "motif": cfg["motif"],
+            "bodyMotif": body_motif["id"] if body_motif else cfg["motif"]["id"],
+            "borderMotif": border_motif["id"] if border_motif else (cfg["borderStyle"].replace('_border', '') if cfg["borderStyle"].endswith('_border') else None),
+            "palluMotif": pallu_motif["id"] if pallu_motif else cfg["motif"]["id"],
+            "userRequestedMotif": primary_motif["id"] if user_specified_motif else None,
             "bodyPattern": cfg["bodyPattern"],
             "borderStyle": cfg["borderStyle"],
             "palluStyle": cfg["palluStyle"],
@@ -462,8 +636,9 @@ def generate_variations_from_prompt(user_prompt, language="en-US", seed=0):
     detected_reqs = {
         "color": palette_label,
         "motif": primary_motif["en"],
-        "border": f"3 Distinct Designs Generated",
-        "style": style_label
+        "border": f"{user_border_style.replace('_', ' ').title()} Border",
+        "style": style_label,
+        "userRequestedMotif": primary_motif["id"] if user_specified_motif else None
     }
 
     return {
